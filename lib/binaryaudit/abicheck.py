@@ -1,4 +1,3 @@
-
 import json
 import os
 import subprocess
@@ -23,8 +22,7 @@ def get_soname_from_xml(xml):
         return ""
 
 
-def serialize(fn):
-    cmd = ["abidw", "--no-corpus-path", fn]
+def _serialize(cmd):
     sout = subprocess.PIPE
     serr = subprocess.STDOUT
     shell = False
@@ -35,8 +33,37 @@ def serialize(fn):
         out = "".join([out.decode('utf-8') for out in [sout, serr] if out])
     except OSError:
         raise
-    # return cmd for logging purposes
-    return process.returncode, out, cmd
+    return process.returncode, out
+
+
+def serialize(fn):
+    cmd = ["abidw", "--no-corpus-path", fn]
+    status, out = _serialize(cmd)
+    return status, out, cmd
+
+
+def serialize_kernel_artifacts(abixml_dir, tree, vmlinux=None, whitelist=None):
+    cmd = ["abidw", "--no-corpus-path"]
+    cmd.extend(["--linux-tree", tree])
+    if vmlinux:
+        cmd.extend(["--vmlinux", vmlinux])
+    if whitelist:
+        cmd.extend(["--kmi-whitelist", whitelist])
+
+    util.note(" ".join(cmd))
+    ret, out = _serialize(cmd)
+    if not 0 == ret:
+        util.error(out)
+        return out, None
+    if not out:
+        util.warn("Empty dump output for '{}'".format(tree))
+        return None, None
+
+    sn = get_soname_from_xml(out)
+
+    out_fn = util.create_path_to_xml(sn, abixml_dir, tree)
+
+    return out, out_fn
 
 
 def compare(ref, cur, suppr=[]):
@@ -67,8 +94,14 @@ def serialize_artifacts(adir, id):
     '''
     for fn in glob.iglob(id + "/**/**", recursive=True):
         if os.path.isfile(fn) and not os.path.islink(fn):
-            if not is_elf(fn):
+            is_elf_artifact = False
+            try:
+                is_elf_artifact = is_elf(fn)
+            except Exception as e:
+                util.warn(str(e))
+            if not is_elf_artifact:
                 continue
+
             # If there's no error, out is the XML representation
             ret, out, cmd = serialize(fn)
             util.note(" ".join(cmd))
@@ -114,6 +147,15 @@ def diff_is_incompatible_change(c):
 
 
 def diff_get_bits(c):
+    ''' Circle through the return value bits
+
+        Parameters:
+            c (int) - Return value to parse.
+
+        Returns:
+            Array with the text representations of bits.
+
+    '''
     a = []
     if diff_is_ok(c):
         a.append("OK")
@@ -126,7 +168,35 @@ def diff_get_bits(c):
     if diff_is_incompatible_change(c):
         a.append("INCOMPATIBLE_CHANGE")
 
+    if 0 == len(a):
+        raise ValueError("Value '{}' can't be interpreted as a libabigail return status.".format(c))
+
     return a
+
+
+def diff_get_bit(c):
+    ''' Circle through the return value bits.
+
+        Parameters:
+            c (int) - Return value to parse.
+
+        Returns:
+            The text representation for the most relevant bit.
+    '''
+
+    # Order matters.
+    if diff_is_ok(c):
+        return "OK"
+    if diff_is_usage_error(c):
+        return "USAGE_ERROR"
+    if diff_is_error(c):
+        return "ERROR"
+    if diff_is_incompatible_change(c):
+        return "INCOMPATIBLE_CHANGE"
+    if diff_is_change(c):
+        return "CHANGE"
+
+    raise ValueError("Value '{}' can't be interpreted as a libabigail return status.".format(c))
 
 
 def generate_package_json(source_dir, out_filename):
